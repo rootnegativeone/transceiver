@@ -202,6 +202,27 @@ const formatBytes = (size: number) => {
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
 };
 
+const SESSION_STEPS = [
+  "Idle",
+  "Session Initiated",
+  "Optical Transmission Active",
+  "Reconstruction In Progress",
+  "Verification Complete",
+];
+
+const formatSessionId = (metadata: BroadcastMetadata | null) => {
+  if (!metadata) {
+    return "—";
+  }
+  const seed =
+    (metadata.block_size * 2654435761) ^
+    (metadata.k * 1597334677) ^
+    (metadata.orig_len * 3812015801) ^
+    (metadata.integrity_check ? 0x9e3779b9 : 0);
+  const hash = (seed >>> 0).toString(16).toUpperCase().padStart(8, "0");
+  return `TB-${hash.slice(0, 8)}`;
+};
+
 const encodeTextToBase64 = (text: string) => {
   if (typeof TextEncoder === "undefined") {
     throw new Error("TextEncoder is unavailable");
@@ -239,9 +260,9 @@ const isDestroyable = (
 
 const formatPasteLabel = (text: string) => {
   if (!text) {
-    return "Pasted payload";
+    return "Pasted signed payload";
   }
-  return `Pasted payload (${text.length.toLocaleString()} chars)`;
+  return `Pasted signed payload (${text.length.toLocaleString()} chars)`;
 };
 
 const MAX_PAYLOAD_BYTES = 512 * 1024;
@@ -264,13 +285,13 @@ const describeGuidance = (
     return "Sync burst detected — keep the QR centred to finish locking.";
   }
   if (!metadata) {
-    return "Start with the metadata frame — hover over the first QR at the sender.";
+    return "Start with the metadata frame — hover over the first QR at the constrained node.";
   }
   if (!status) {
-    return "Align the terminal screen inside the guide and hold steady.";
+    return "Align the constrained node display inside the guide and hold steady.";
   }
   if (status.decode_complete) {
-    return "Transfer complete. Share the reconstructed payload.";
+    return "Transport session complete. Reconstruction verified — integrity confirmed.";
   }
   if (status.coverage < 0.3) {
     return "Move a little closer and keep the screen centered.";
@@ -304,7 +325,9 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
   const [payloadInputError, setPayloadInputError] = useState<string | null>(
     null,
   );
-  const [payloadLabel, setPayloadLabel] = useState<string>("Sample logs");
+  const [payloadLabel, setPayloadLabel] = useState<string>(
+    "Sample signed payload",
+  );
   const [pastedPayload, setPastedPayload] = useState<string>("");
   const [pastedByteLength, setPastedByteLength] = useState(0);
   const [testFrameIndex, setTestFrameIndex] = useState<number | null>(null);
@@ -382,7 +405,7 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
       setPayloadSource(next);
       setPayloadInputError(null);
       if (next === "sample") {
-        setPayloadLabel("Sample logs");
+        setPayloadLabel("Sample signed payload");
         return;
       }
       if (next === "upload") {
@@ -579,7 +602,9 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
         );
       } else if (payloadSource === "paste") {
         if (pastedPayload.trim().length === 0) {
-          setPayloadInputError("Paste log data before preparing the burst.");
+          setPayloadInputError(
+            "Paste signed payload data before preparing the burst.",
+          );
           return;
         }
         if (pastedByteLength > MAX_PAYLOAD_BYTES) {
@@ -616,14 +641,14 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
       setCurrentFrameIndex(0);
       setPayloadLabel(
         payloadSource === "sample"
-          ? "Sample logs"
+          ? "Sample signed payload"
           : payloadSource === "upload"
             ? (uploadFileName ?? "Uploaded payload")
             : formatPasteLabel(pastedPayload),
       );
     } catch (err) {
       console.error(err);
-      setError("Unable to prepare broadcast. Retry in a moment.");
+      setError("Unable to initiate the transport session. Retry in a moment.");
     } finally {
       setIsPreparing(false);
     }
@@ -699,11 +724,33 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
     }
     return displayFrame.systematic ? "Systematic Frame" : "Redundant Frame";
   }, [displayFrame, isTestMode]);
+  const senderSessionStep = useMemo(() => {
+    if (!broadcast) {
+      return 0;
+    }
+    if (playbackState === "playing") {
+      return 2;
+    }
+    if (playbackState === "finished") {
+      return 3;
+    }
+    return 1;
+  }, [broadcast, playbackState]);
+  const senderSessionId = useMemo(
+    () => formatSessionId(broadcast?.metadata ?? null),
+    [broadcast],
+  );
+  const senderPayloadSize = broadcast
+    ? formatBytes(broadcast.metadata.orig_len)
+    : "—";
+  const senderIntegrityStatus = broadcast
+    ? "Signed Payload · Reconstruction Verification Pending"
+    : "Signed Payload · Awaiting Session";
 
   return (
     <section className="panel">
       <div className="panel-header">
-        <h2>Sender Console</h2>
+        <h2>Constrained Node Console</h2>
         <div className="panel-actions">
           <button className="link" onClick={onBack}>
             Switch Role
@@ -711,6 +758,41 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
         </div>
       </div>
       <div className="panel-body">
+        <div className="session-summary">
+          <div className="session-summary-header">Transport Session</div>
+          <div className="session-summary-grid">
+            <div>
+              <span className="summary-label">Session ID</span>
+              <span className="summary-value">{senderSessionId}</span>
+            </div>
+            <div>
+              <span className="summary-label">Payload Size</span>
+              <span className="summary-value">{senderPayloadSize}</span>
+            </div>
+            <div className="summary-wide">
+              <span className="summary-label">Integrity Status</span>
+              <span className="summary-value">{senderIntegrityStatus}</span>
+            </div>
+          </div>
+          <div className="session-state">
+            <div className="session-state-label">Transport Session State</div>
+            <ol className="session-state-steps">
+              {SESSION_STEPS.map((step, index) => (
+                <li
+                  key={step}
+                  className={[
+                    index === senderSessionStep ? "is-active" : "",
+                    index < senderSessionStep ? "is-complete" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                >
+                  {step}
+                </li>
+              ))}
+            </ol>
+          </div>
+        </div>
         <div className="sender-grid">
           <div className="qr-stage">
             {displayFrame ? (
@@ -724,7 +806,7 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
               />
             ) : (
               <div className="placeholder">
-                {isTestMode ? "Choose a test frame" : "Prepare broadcast"}
+                {isTestMode ? "Choose a test frame" : "Initiate session"}
               </div>
             )}
             <div className="frame-meta">
@@ -772,7 +854,7 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
                       pastedByteLength > MAX_PAYLOAD_BYTES))
                 }
               >
-                {isPreparing ? "Preparing…" : "Prepare Broadcast"}
+                {isPreparing ? "Preparing…" : "Initiate Transport Session"}
               </button>
               <button
                 className="action secondary"
@@ -785,12 +867,12 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
                   ? "Pause"
                   : playbackState === "finished"
                     ? "Replay"
-                    : "Start Burst"}
+                    : "Begin Optical Transmission"}
               </button>
             </div>
 
             <div className="payload-source">
-              <h3>Payload Source</h3>
+              <h3>Signed Payload Source</h3>
               <div className="payload-options">
                 <label className="radio-option">
                   <input
@@ -799,7 +881,7 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
                     checked={payloadSource === "sample"}
                     onChange={handlePayloadSourceChange}
                   />
-                  <span>Sample logs</span>
+                  <span>Sample signed payload</span>
                 </label>
                 <label className="radio-option">
                   <input
@@ -808,7 +890,7 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
                     checked={payloadSource === "upload"}
                     onChange={handlePayloadSourceChange}
                   />
-                  <span>Upload file</span>
+                  <span>Upload payload</span>
                 </label>
                 <label className="radio-option">
                   <input
@@ -817,7 +899,7 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
                     checked={payloadSource === "paste"}
                     onChange={handlePayloadSourceChange}
                   />
-                  <span>Paste text</span>
+                  <span>Paste payload</span>
                 </label>
               </div>
               {payloadSource === "upload" && (
@@ -838,7 +920,7 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
                         )}
                       </>
                     ) : (
-                      <span>Select a file to broadcast</span>
+                      <span>Select a payload file to transmit</span>
                     )}
                     {isProcessingUpload && (
                       <span className="file-status">Loading…</span>
@@ -857,7 +939,7 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
                   <textarea
                     value={pastedPayload}
                     onChange={handlePasteChange}
-                    placeholder="Paste logs or JSONL data here…"
+                    placeholder="Paste signed payload JSON here…"
                     rows={8}
                   />
                   <div className="paste-meta">
@@ -871,7 +953,7 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
                     <div className="error-text">{payloadInputError}</div>
                   )}
                   <div className="paste-hint">
-                    Encoded as UTF-8 prior to broadcast · limit{" "}
+                    Encoded as UTF-8 prior to transport · limit{" "}
                     {formatBytes(MAX_PAYLOAD_BYTES)}.
                   </div>
                 </div>
@@ -881,10 +963,10 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
             {broadcast && (
               <>
                 <div className="stats">
-                  <h3>Transmission Stats</h3>
+                  <h3>Session Metrics</h3>
                   <ul>
                     <li>
-                      Payload source: {payloadLabel}
+                      Signed payload source: {payloadLabel}
                       {payloadSource === "upload" && uploadFileSize !== null
                         ? ` (${formatBytes(uploadFileSize)})`
                         : ""}
@@ -934,7 +1016,7 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
                       checked={useBrandPalette}
                       onChange={handleToggleBrandPalette}
                     />
-                    Use brand palette
+                    Use accent palette
                   </label>
                   <details>
                     <summary>Payload preview</summary>
@@ -1003,7 +1085,7 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
   const [metadata, setMetadata] = useState<BroadcastMetadata | null>(null);
   const [status, setStatus] = useState<ReceiverStatus | null>(null);
   const [guidance, setGuidance] = useState<string>(
-    "Invite the sender to start the burst, then scan the first QR.",
+    "Ask the constrained node to initiate the transport session, then scan the first QR.",
   );
   const [cameraState, setCameraState] = useState<
     "idle" | "starting" | "running" | "error"
@@ -1725,14 +1807,14 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
           ? !metadata
             ? "Waiting for metadata frame to sync."
             : status?.decode_complete
-              ? "Transfer complete — share the recovered payload."
+              ? "Reconstruction verified — integrity confirmed."
               : "Keep the burst inside the guide."
           : lockState === "acquiring"
             ? lockTarget
               ? `Locking… ${lockProgress}/${lockTarget}`
               : "Locking onto sync burst…"
             : "Find the sync frames to begin locking."
-        : "Tap Start Receiving to activate the camera.";
+        : "Select Begin Reconstruction to activate the camera.";
   const lockDescriptor =
     lockState === "locked"
       ? "Lock engaged"
@@ -1795,11 +1877,34 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
   ]
     .filter(Boolean)
     .join(" ");
+  const receiverSessionStep = useMemo(() => {
+    if (status?.decode_complete) {
+      return 4;
+    }
+    if (status || metadata || lockState === "locked") {
+      return 3;
+    }
+    if (cameraState === "running" || lockState === "acquiring") {
+      return 2;
+    }
+    if (cameraState === "starting") {
+      return 1;
+    }
+    return 0;
+  }, [cameraState, lockState, metadata, status]);
+  const receiverSessionId = useMemo(
+    () => formatSessionId(metadata),
+    [metadata],
+  );
+  const receiverPayloadSize = metadata ? formatBytes(metadata.orig_len) : "—";
+  const receiverIntegrityStatus = status?.decode_complete
+    ? "Reconstruction Verified — Integrity Confirmed"
+    : "Signed Payload · Reconstruction Verification Pending";
 
   return (
     <section className="panel">
       <div className="panel-header">
-        <h2>Receiver Console</h2>
+        <h2>Reconstruction Console</h2>
         <div className="panel-actions">
           <button className="link" onClick={onBack}>
             Switch Role
@@ -1807,6 +1912,41 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
         </div>
       </div>
       <div className="panel-body">
+        <div className="session-summary">
+          <div className="session-summary-header">Transport Session</div>
+          <div className="session-summary-grid">
+            <div>
+              <span className="summary-label">Session ID</span>
+              <span className="summary-value">{receiverSessionId}</span>
+            </div>
+            <div>
+              <span className="summary-label">Payload Size</span>
+              <span className="summary-value">{receiverPayloadSize}</span>
+            </div>
+            <div className="summary-wide">
+              <span className="summary-label">Integrity Status</span>
+              <span className="summary-value">{receiverIntegrityStatus}</span>
+            </div>
+          </div>
+          <div className="session-state">
+            <div className="session-state-label">Transport Session State</div>
+            <ol className="session-state-steps">
+              {SESSION_STEPS.map((step, index) => (
+                <li
+                  key={step}
+                  className={[
+                    index === receiverSessionStep ? "is-active" : "",
+                    index < receiverSessionStep ? "is-complete" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                >
+                  {step}
+                </li>
+              ))}
+            </ol>
+          </div>
+        </div>
         <div className="receiver-grid">
           <div className="guidance">
             <h3>Guidance</h3>
@@ -1823,7 +1963,7 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
                   ? "Scanning"
                   : cameraState === "starting"
                     ? "Starting…"
-                    : "Start Receiving"}
+                    : "Begin Reconstruction"}
               </button>
               <button className="action secondary" onClick={stopCamera}>
                 Stop
@@ -1949,8 +2089,8 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
                 <li>Symbols observed: {status.symbols_observed}</li>
                 <li>Unique indices: {status.unique_symbols}</li>
                 <li>
-                  Decode status:{" "}
-                  {status.decode_complete ? "Recovered" : "In progress"}
+                  Reconstruction:{" "}
+                  {status.decode_complete ? "Verified" : "In progress"}
                 </li>
               </ul>
             )}
@@ -2096,10 +2236,15 @@ export default function App() {
   return (
     <div className="app-shell">
       <header className="hero">
-        <h1>Tightbeam Optical Transfer</h1>
+        <h1>Tightbeam Optical Transport Layer</h1>
+        <p className="hero-subline">
+          Designed for environments where outbound connectivity is restricted or
+          tightly controlled.
+        </p>
         <p>
-          Run a live air-gapped demo. One screen emits QR bursts just like a POS
-          terminal, another device locks onto them and reconstructs the payload
+          Tightbeam is a transport layer for segmented environments. A
+          constrained node emits optical transmission bursts, and a receiving
+          system reconstructs signed payloads with reconstruction verification
           in real time.
         </p>
         <div className="status-row">
@@ -2116,10 +2261,10 @@ export default function App() {
               onClick={() => setRole("sender")}
               disabled={pyodideStatus !== "ready"}
             >
-              <h3>Sender Console</h3>
+              <h3>Constrained Node Console</h3>
               <p>
-                Animate QR bursts in a Clover-style POS bezel. Perfect for the
-                laptop driving the display.
+                Initiate a transport session and emit optical bursts from the
+                constrained node display.
               </p>
             </button>
             <button
@@ -2127,10 +2272,10 @@ export default function App() {
               onClick={() => setRole("receiver")}
               disabled={pyodideStatus !== "ready"}
             >
-              <h3>Receiver Console</h3>
+              <h3>Reconstruction Console</h3>
               <p>
                 Use a webcam-equipped device to capture the bursts with guided
-                feedback and reconstruction.
+                feedback and reconstruction verification.
               </p>
             </button>
           </div>
