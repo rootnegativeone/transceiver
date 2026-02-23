@@ -8,6 +8,7 @@ import base64
 import json
 import random
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from sim_payload import generate_sample_logs
@@ -16,13 +17,16 @@ from common.fountain.decoder import LTDecoder
 from common.fountain.encoder import LTEncoder
 from common.shared.metrics import FountainMetrics
 
-DEFAULT_BLOCK_SIZE = 48
+DEFAULT_BLOCK_SIZE = 96
 DEFAULT_REDUNDANCY = 4
 DEFAULT_SEED = 1337
 
 SYNC_PREAMBLE_COUNT = 6
-SYNC_INSERT_INTERVAL = 6
+SYNC_INSERT_INTERVAL = 8
 SYNC_CONFIRMATION_REQUIRED = 4
+DECODE_MARGIN = 12
+DECODE_SYMBOL_STEP = 8
+DECODE_MIN_INTERVAL = 0.4
 
 
 def _normalize_indices(idxs: int | Iterable[int]) -> List[int]:
@@ -226,6 +230,20 @@ class ReceiverSession:
     sequences_seen: set[int] = field(default_factory=set)
     unique_indices: set[int] = field(default_factory=set)
     recovered_text: Optional[str] = None
+    accepted_symbols: int = 0
+    last_decode_attempt: float = 0.0
+    last_decode_symbols: int = 0
+    last_decode_duration: float = 0.0
+    phase: str = "collecting"
+    phase_started_at: float = field(init=False)
+    phase_durations: Dict[str, float] = field(
+        default_factory=lambda: {
+            "collecting": 0.0,
+            "solving": 0.0,
+            "finalizing": 0.0,
+        }
+    )
+    start_time: float = field(init=False)
 
     def __post_init__(self) -> None:
         self.metrics = FountainMetrics()
@@ -236,6 +254,8 @@ class ReceiverSession:
             integrity_check=self.integrity_check,
             metrics=self.metrics,
         )
+        self.start_time = perf_counter()
+        self.phase_started_at = self.start_time
 
     def add_symbol(
         self, sequence: int, indices: List[int], payload_hex: str
@@ -250,26 +270,71 @@ class ReceiverSession:
 
         self.sequences_seen.add(sequence)
         self.unique_indices.update(indices)
+        self.accepted_symbols += 1
 
-        recovered = self.decoder.decode()
-        if recovered is not None:
-            self.recovered_text = recovered.decode("utf-8")
+        now = perf_counter()
+        ready_for_decode = self.accepted_symbols >= self.k + DECODE_MARGIN
+        should_attempt = ready_for_decode and (
+            (self.accepted_symbols - self.last_decode_symbols) >= DECODE_SYMBOL_STEP
+            or (now - self.last_decode_attempt) >= DECODE_MIN_INTERVAL
+        )
+
+        if should_attempt and self.recovered_text is None:
+            self._set_phase("solving")
+            self.last_decode_attempt = now
+            self.last_decode_symbols = self.accepted_symbols
+            attempt_start = perf_counter()
+            recovered = self.decoder.decode()
+            self.last_decode_duration = perf_counter() - attempt_start
+            if recovered is not None:
+                self.recovered_text = recovered.decode("utf-8")
+                self._set_phase("finalizing")
+        elif self.recovered_text is None:
+            self._set_phase("collecting")
 
         return self._status_dict(redundant=False, newly_added=True)
 
     def _status_dict(self, *, redundant: bool, newly_added: bool) -> Dict[str, object]:
         coverage = len(self.unique_indices) / self.k if self.k else 0.0
         summary = self.metrics.summary()
+        phase_durations = dict(self.phase_durations)
+        now = perf_counter()
+        if self.phase in phase_durations:
+            phase_durations[self.phase] += now - self.phase_started_at
         return {
             "redundant": redundant,
             "newly_added": newly_added,
             "symbols_observed": len(self.sequences_seen),
             "unique_symbols": len(self.unique_indices),
+            "accepted_symbols_total": self.accepted_symbols,
+            "accepted_unique_symbols": len(self.unique_indices),
+            "k": self.k,
             "coverage": coverage,
             "decode_complete": self.recovered_text is not None,
             "recovered_text": self.recovered_text,
+            "phase": self.phase,
+            "last_decode_attempt_ms": round(
+                (self.last_decode_attempt - self.start_time) * 1000, 1
+            )
+            if self.last_decode_attempt
+            else None,
+            "last_decode_duration_ms": round(self.last_decode_duration * 1000, 1)
+            if self.last_decode_duration
+            else None,
+            "phase_durations_ms": {
+                key: round(value * 1000, 1) for key, value in phase_durations.items()
+            },
             "metrics": summary,
         }
+
+    def _set_phase(self, next_phase: str) -> None:
+        if next_phase == self.phase:
+            return
+        now = perf_counter()
+        if self.phase in self.phase_durations:
+            self.phase_durations[self.phase] += now - self.phase_started_at
+        self.phase = next_phase
+        self.phase_started_at = now
 
 
 _active_session: Optional[ReceiverSession] = None

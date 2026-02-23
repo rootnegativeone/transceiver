@@ -107,9 +107,16 @@ type ReceiverStatus = {
   newly_added: boolean;
   symbols_observed: number;
   unique_symbols: number;
+  accepted_symbols_total: number;
+  accepted_unique_symbols: number;
+  k: number;
   coverage: number;
   decode_complete: boolean;
   recovered_text: string | null;
+  phase: "collecting" | "solving" | "finalizing";
+  last_decode_attempt_ms: number | null;
+  last_decode_duration_ms: number | null;
+  phase_durations_ms: Record<string, number>;
   metrics: MetricsSummary;
 };
 
@@ -202,6 +209,16 @@ const formatBytes = (size: number) => {
     unitIndex += 1;
   } while (value >= 1024 && unitIndex < units.length - 1);
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
+};
+
+const formatMs = (value: number | null | undefined) => {
+  if (value === null || value === undefined) {
+    return "—";
+  }
+  if (value >= 1000) {
+    return `${(value / 1000).toFixed(1)}s`;
+  }
+  return `${Math.round(value)}ms`;
 };
 
 const SESSION_STEPS = [
@@ -683,6 +700,8 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
     setPlaybackState("idle");
   }, [stopPlaybackTimer]);
 
+  const FRAME_INTERVAL_MS = 450;
+
   useEffect(() => {
     if (!broadcast || playbackState !== "playing") {
       return;
@@ -705,7 +724,7 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
         return;
       }
       setCurrentFrameIndex(idx);
-    }, 650);
+    }, FRAME_INTERVAL_MS);
 
     playbackTimer.current = timer;
 
@@ -1435,10 +1454,10 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
   }, [cameraState, requestResync]);
 
   const handleSymbol = useCallback(
-    async (symbolId: number, indices: number[], payloadHex: string) => {
+    async (sequence: number, indices: number[], payloadHex: string) => {
       const result = await callPythonJson(
         "receiver_add_symbol",
-        symbolId,
+        sequence,
         indices,
         payloadHex,
       );
@@ -1496,8 +1515,8 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
       if (!sequencePart || !indicesPart || !payloadHex) {
         return;
       }
-      const symbolId = Number.parseInt(sequencePart, 10);
-      if (Number.isNaN(symbolId)) {
+      const sequence = Number.parseInt(sequencePart, 10);
+      if (Number.isNaN(sequence)) {
         return;
       }
       const indices = indicesPart
@@ -1508,7 +1527,7 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
       if (!indices.length) {
         return;
       }
-      await handleSymbol(symbolId, indices, payloadHex);
+      await handleSymbol(sequence, indices, payloadHex);
     },
     [handleMetadata, handleSymbol, handleSync],
   );
@@ -1927,6 +1946,13 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
   const receiverIntegrityStatus = status?.decode_complete
     ? "Reconstruction Verified — Integrity Confirmed"
     : "Signed Payload · Reconstruction Verification Pending";
+  const receiverPhaseLabel = status
+    ? status.phase === "solving"
+      ? "Solving"
+      : status.phase === "finalizing"
+        ? "Finalizing"
+        : "Collecting"
+    : "Collecting";
 
   return (
     <section className="panel">
@@ -2113,8 +2139,24 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
             </div>
             {status && (
               <ul className="metrics-list">
-                <li>Symbols observed: {status.symbols_observed}</li>
-                <li>Unique indices: {status.unique_symbols}</li>
+                <li>Phase: {receiverPhaseLabel}</li>
+                <li>
+                  Accepted symbols: {status.accepted_symbols_total} / {status.k}
+                </li>
+                <li>Unique indices: {status.accepted_unique_symbols}</li>
+                <li>
+                  Last solve attempt: {formatMs(status.last_decode_attempt_ms)}
+                </li>
+                <li>
+                  Last solve duration:{" "}
+                  {formatMs(status.last_decode_duration_ms)}
+                </li>
+                <li>
+                  Phase time · Collecting{" "}
+                  {formatMs(status.phase_durations_ms.collecting)} · Solving{" "}
+                  {formatMs(status.phase_durations_ms.solving)} · Finalizing{" "}
+                  {formatMs(status.phase_durations_ms.finalizing)}
+                </li>
                 <li>
                   Reconstruction:{" "}
                   {status.decode_complete ? "Verified" : "In progress"}
