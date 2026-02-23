@@ -59,8 +59,6 @@ type BroadcastFrameSync = {
 type BroadcastFrameSymbol = {
   sequence: number;
   type: "symbol";
-  symbol_id: number;
-  slot: number;
   indices: number[];
   degree: number;
   payload_hex: string;
@@ -71,12 +69,7 @@ type BroadcastFrameSymbol = {
 type BroadcastFrame =
   | BroadcastFrameMeta
   | BroadcastFrameSymbol
-  | BroadcastFrameSync
-  | {
-      sequence: number;
-      type: "symbol_pair";
-      symbols: BroadcastFrameSymbol[];
-    };
+  | BroadcastFrameSync;
 
 type SyncConfig = {
   preamble_count: number;
@@ -219,13 +212,6 @@ const SESSION_STEPS = [
   "Verification Complete",
 ];
 
-const QR_VERSION = 8;
-const QR_MARGIN_MODULES = 4;
-const QR_MODULE_TARGET = 7;
-const QR_MODULES = 17 + 4 * QR_VERSION;
-const QR_BASE_SIZE = (QR_MODULES + 2 * QR_MARGIN_MODULES) * QR_MODULE_TARGET;
-const MAX_QR_VALUE_BYTES = 180;
-
 const formatSessionId = (metadata: BroadcastMetadata | null) => {
   if (!metadata) {
     return "—";
@@ -301,7 +287,7 @@ const describeGuidance = (
     if (lockTarget) {
       return `Locking in… ${lockProgress}/${lockTarget} sync frames captured.`;
     }
-    return "Sync burst detected — keep both QRs centred to finish locking.";
+    return "Sync burst detected — keep the QR centred to finish locking.";
   }
   if (!metadata) {
     return "Start with the metadata frame — hover over the first QR at the constrained node.";
@@ -318,7 +304,7 @@ const describeGuidance = (
   if (status.coverage < 0.65) {
     return "Great capture — hold position while the next bursts arrive.";
   }
-  return "Almost there. Keep both QRs in view for the final frames.";
+  return "Almost there. Keep the QR in view for the final frames.";
 };
 
 const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
@@ -331,8 +317,8 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
   const [autoLoop, setAutoLoop] = useState(true);
   const [qrSize, setQrSize] = useState(() =>
     typeof window !== "undefined"
-      ? Math.min(window.innerWidth * 0.75, QR_BASE_SIZE)
-      : QR_BASE_SIZE,
+      ? Math.min(window.innerWidth * 0.45, 360)
+      : 320,
   );
   const [sizeMultiplier, setSizeMultiplier] = useState(1);
   const [useBrandPalette, setUseBrandPalette] = useState(false);
@@ -362,37 +348,6 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
   const totalFrames = broadcast?.total_frames ?? 0;
   const isTestMode = testFrameIndex !== null;
   const displaySize = Math.round(qrSize * sizeMultiplier);
-  const displaySymbols = useMemo(() => {
-    if (!displayFrame) {
-      return [];
-    }
-    if (displayFrame.type === "symbol_pair") {
-      return displayFrame.symbols;
-    }
-    if (displayFrame.type === "symbol") {
-      return [displayFrame];
-    }
-    return [];
-  }, [displayFrame]);
-  const displayQrValues = useMemo(() => {
-    if (!displayFrame) {
-      return [];
-    }
-    if (displaySymbols.length) {
-      return displaySymbols.map((symbol) => symbol.qr_value);
-    }
-    if ("qr_value" in displayFrame) {
-      return [displayFrame.qr_value];
-    }
-    return [];
-  }, [displayFrame, displaySymbols]);
-  const oversizedQrValues = useMemo(
-    () =>
-      displayQrValues.filter(
-        (value) => measureUtf8Bytes(value) > MAX_QR_VALUE_BYTES,
-      ),
-    [displayQrValues],
-  );
   const qrColors = useMemo(
     () =>
       useBrandPalette
@@ -420,7 +375,7 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
       return;
     }
     const updateSize = () => {
-      setQrSize(Math.min(window.innerWidth * 0.75, QR_BASE_SIZE));
+      setQrSize(Math.min(window.innerWidth * 0.45, 360));
     };
     updateSize();
     window.addEventListener("resize", updateSize);
@@ -572,15 +527,6 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
         if (!frame.systematic && firstRedundant === null) {
           firstRedundant = idx;
         }
-      } else if (frame.type === "symbol_pair") {
-        const hasSystematic = frame.symbols.some((symbol) => symbol.systematic);
-        const hasRedundant = frame.symbols.some((symbol) => !symbol.systematic);
-        if (hasSystematic && firstSystematic === null) {
-          firstSystematic = idx;
-        }
-        if (hasRedundant && firstRedundant === null) {
-          firstRedundant = idx;
-        }
       }
     });
 
@@ -627,12 +573,8 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
     if (!displayFrame) {
       return;
     }
-    const copyValue = displayQrValues[0];
-    if (!copyValue) {
-      return;
-    }
     try {
-      await navigator.clipboard.writeText(copyValue);
+      await navigator.clipboard.writeText(displayFrame.qr_value);
       setTestCopyState("copied");
       window.setTimeout(() => setTestCopyState("idle"), 1600);
     } catch (err) {
@@ -785,21 +727,6 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
     if (displayFrame.type === "meta") {
       return "Metadata";
     }
-    if (displayFrame.type === "symbol_pair") {
-      const hasSystematic = displayFrame.symbols.some(
-        (symbol) => symbol.systematic,
-      );
-      const hasRedundant = displayFrame.symbols.some(
-        (symbol) => !symbol.systematic,
-      );
-      if (hasSystematic && !hasRedundant) {
-        return "Systematic Pair";
-      }
-      if (!hasSystematic && hasRedundant) {
-        return "Redundant Pair";
-      }
-      return "Symbol Pair";
-    }
     return displayFrame.systematic ? "Systematic Frame" : "Redundant Frame";
   }, [displayFrame, isTestMode]);
   const senderSessionStep = useMemo(() => {
@@ -874,41 +801,14 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
         <div className="sender-grid">
           <div className="qr-stage">
             {displayFrame ? (
-              oversizedQrValues.length ? (
-                <div className="placeholder placeholder-error">
-                  QR payload exceeds fixed version capacity. Reduce payload size
-                  or block size.
-                </div>
-              ) : (
-                <div
-                  className={
-                    displayQrValues.length > 1 ? "qr-stack" : "qr-single"
-                  }
-                >
-                  {displayQrValues.map((value, idx) => (
-                    <div
-                      className="qr-tile"
-                      key={`${displayFrameIndex}-${idx}`}
-                    >
-                      <QRCodeSVG
-                        value={value}
-                        size={displaySize}
-                        bgColor={qrColors.bg}
-                        fgColor={qrColors.fg}
-                        includeMargin
-                        marginSize={QR_MARGIN_MODULES}
-                        level="M"
-                        version={QR_VERSION}
-                      />
-                      {displayQrValues.length > 1 && (
-                        <div className="qr-slot-label">
-                          {idx === 0 ? "Slot A" : "Slot B"}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )
+              <QRCodeSVG
+                value={displayFrame.qr_value}
+                size={displaySize}
+                bgColor={qrColors.bg}
+                fgColor={qrColors.fg}
+                includeMargin
+                level="H"
+              />
             ) : (
               <div className="placeholder">
                 {isTestMode ? "Choose a test frame" : "Initiate session"}
@@ -934,13 +834,6 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
               {displayFrame?.type === "symbol" && (
                 <div>
                   d{displayFrame.degree} · {displayFrame.indices.join(", ")}
-                </div>
-              )}
-              {displayFrame?.type === "symbol_pair" && (
-                <div>
-                  {displayFrame.symbols
-                    .map((symbol) => `d${symbol.degree}`)
-                    .join(" · ")}
                 </div>
               )}
               {displayFrame?.type === "meta" && broadcast && (
@@ -1178,9 +1071,7 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
                       <div className="test-frame-label">
                         Pinned value (frame #{displayFrameIndex + 1})
                       </div>
-                      {displayQrValues.map((value, idx) => (
-                        <pre key={`${displayFrameIndex}-${idx}`}>{value}</pre>
-                      ))}
+                      <pre>{displayFrame.qr_value}</pre>
                     </div>
                   )}
                 </div>
@@ -1236,6 +1127,7 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
     useState<ManualDecodeState>(createManualDecodeState);
   const [, forceDiagnosticUpdate] = useState(0);
   const lastValueRef = useRef<string | null>(null);
+  const lastValueTimestampRef = useRef(0);
   const animationRef = useRef<number | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const sampleCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1415,6 +1307,8 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
       setStatus(null);
       setCameraErrorDetails(null);
       setCameraState("idle");
+      lastValueRef.current = null;
+      lastValueTimestampRef.current = 0;
     },
     [],
   );
@@ -1439,6 +1333,8 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
     setLockTarget(null);
     lastSymbolTimestampRef.current = null;
     pendingMetadataRef.current = null;
+    lastValueRef.current = null;
+    lastValueTimestampRef.current = 0;
   }, []);
 
   const handleMetadata = useCallback(
@@ -1557,10 +1453,15 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
 
   const processValue = useCallback(
     async (value: string) => {
-      if (value === lastValueRef.current) {
+      const now = Date.now();
+      if (
+        value === lastValueRef.current &&
+        now - lastValueTimestampRef.current < 400
+      ) {
         return;
       }
       lastValueRef.current = value;
+      lastValueTimestampRef.current = now;
       setLastFrame(value);
 
       if (value.startsWith("Y:")) {
@@ -1587,53 +1488,9 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
           (lockStateRef.current === "acquiring" &&
             lockProgressRef.current > 0));
 
-      const isS2 = value.startsWith("S2:");
-      const isS1 = value.startsWith("S:");
-      if ((!isS2 && !isS1) || !allowSymbols) {
+      if (!value.startsWith("S:") || !allowSymbols) {
         return;
       }
-      if (isS2) {
-        const remainder = value.slice(3);
-        const [
-          sessionPart,
-          sequencePart,
-          slotPart,
-          symbolIdPart,
-          indicesPart,
-          payloadHex,
-        ] = remainder.split("|", 6);
-        if (
-          !sessionPart ||
-          !sequencePart ||
-          !slotPart ||
-          !symbolIdPart ||
-          !indicesPart ||
-          !payloadHex
-        ) {
-          return;
-        }
-        if (
-          metadataRef.current?.session_id &&
-          metadataRef.current.session_id !== sessionPart
-        ) {
-          return;
-        }
-        const symbolId = Number.parseInt(symbolIdPart, 10);
-        if (Number.isNaN(symbolId)) {
-          return;
-        }
-        const indices = indicesPart
-          .split(",")
-          .filter(Boolean)
-          .map((item) => Number.parseInt(item, 10))
-          .filter((item) => !Number.isNaN(item));
-        if (!indices.length) {
-          return;
-        }
-        await handleSymbol(symbolId, indices, payloadHex);
-        return;
-      }
-
       const remainder = value.slice(2);
       const [sequencePart, indicesPart, payloadHex] = remainder.split("|", 3);
       if (!sequencePart || !indicesPart || !payloadHex) {
@@ -1809,6 +1666,7 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
     try {
       setCameraState("starting");
       lastValueRef.current = null;
+      lastValueTimestampRef.current = 0;
       setMetadata(null);
       setStatus(null);
       setRecoveredPayload(null);
