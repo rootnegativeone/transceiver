@@ -47,6 +47,8 @@ class LTDecoder:
         self.tag_bytes = 4 if integrity_check else 0
         self.metrics = metrics
         self.symbols: List[Tuple[List[int], bytes]] = []
+        self.last_pivots = 0
+        self.last_rank = 0
 
     def add_symbol(self, idxs: int | Iterable[int], payload: bytes) -> bool:
         """Add a received symbol, dropping it if integrity checks fail."""
@@ -85,6 +87,8 @@ class LTDecoder:
         start = perf_counter()
         matrix = self._build_coefficient_matrix(self.symbols)
         selection, pivots = self._select_independent_rows(matrix)
+        self.last_pivots = pivots
+        self.last_rank = pivots
         if selection is None:
             if self.metrics:
                 duration = perf_counter() - start

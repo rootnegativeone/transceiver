@@ -235,12 +235,18 @@ class ReceiverSession:
     last_decode_symbols: int = 0
     last_decode_duration: float = 0.0
     phase: str = "collecting"
+    decode_error: Optional[str] = None
+    finalize_status: str = "idle"
+    finalize_started_at: Optional[float] = None
+    finalize_error: Optional[str] = None
     phase_started_at: float = field(init=False)
     phase_durations: Dict[str, float] = field(
         default_factory=lambda: {
             "collecting": 0.0,
             "solving": 0.0,
             "finalizing": 0.0,
+            "done": 0.0,
+            "error": 0.0,
         }
     )
     start_time: float = field(init=False)
@@ -260,37 +266,22 @@ class ReceiverSession:
     def add_symbol(
         self, sequence: int, indices: List[int], payload_hex: str
     ) -> Dict[str, object]:
+        now = perf_counter()
         if sequence in self.sequences_seen:
+            self._maybe_attempt_decode(now, new_symbol=False)
             return self._status_dict(redundant=True, newly_added=False)
 
         payload = bytes.fromhex(payload_hex)
         accepted = self.decoder.add_symbol(indices, payload)
         if not accepted:
+            self._maybe_attempt_decode(now, new_symbol=False)
             return self._status_dict(redundant=False, newly_added=False)
 
         self.sequences_seen.add(sequence)
         self.unique_indices.update(indices)
         self.accepted_symbols += 1
 
-        now = perf_counter()
-        ready_for_decode = self.accepted_symbols >= self.k + DECODE_MARGIN
-        should_attempt = ready_for_decode and (
-            (self.accepted_symbols - self.last_decode_symbols) >= DECODE_SYMBOL_STEP
-            or (now - self.last_decode_attempt) >= DECODE_MIN_INTERVAL
-        )
-
-        if should_attempt and self.recovered_text is None:
-            self._set_phase("solving")
-            self.last_decode_attempt = now
-            self.last_decode_symbols = self.accepted_symbols
-            attempt_start = perf_counter()
-            recovered = self.decoder.decode()
-            self.last_decode_duration = perf_counter() - attempt_start
-            if recovered is not None:
-                self.recovered_text = recovered.decode("utf-8")
-                self._set_phase("finalizing")
-        elif self.recovered_text is None:
-            self._set_phase("collecting")
+        self._maybe_attempt_decode(now, new_symbol=True)
 
         return self._status_dict(redundant=False, newly_added=True)
 
@@ -309,6 +300,8 @@ class ReceiverSession:
             "accepted_symbols_total": self.accepted_symbols,
             "accepted_unique_symbols": len(self.unique_indices),
             "k": self.k,
+            "rank_estimate": self.decoder.last_rank,
+            "unknowns_remaining": max(self.k - self.decoder.last_rank, 0),
             "coverage": coverage,
             "decode_complete": self.recovered_text is not None,
             "recovered_text": self.recovered_text,
@@ -318,12 +311,23 @@ class ReceiverSession:
             )
             if self.last_decode_attempt
             else None,
+            "last_decode_attempt_age_ms": round(
+                (now - self.last_decode_attempt) * 1000, 1
+            )
+            if self.last_decode_attempt
+            else None,
             "last_decode_duration_ms": round(self.last_decode_duration * 1000, 1)
             if self.last_decode_duration
             else None,
             "phase_durations_ms": {
                 key: round(value * 1000, 1) for key, value in phase_durations.items()
             },
+            "decode_error": self.decode_error,
+            "finalize_status": self.finalize_status,
+            "finalize_error": self.finalize_error,
+            "finalize_elapsed_ms": round((now - self.finalize_started_at) * 1000, 1)
+            if self.finalize_started_at and self.finalize_status == "in_progress"
+            else None,
             "metrics": summary,
         }
 
@@ -335,6 +339,54 @@ class ReceiverSession:
             self.phase_durations[self.phase] += now - self.phase_started_at
         self.phase = next_phase
         self.phase_started_at = now
+
+    def _maybe_attempt_decode(self, now: float, *, new_symbol: bool) -> None:
+        if self.recovered_text is not None or self.phase == "error":
+            return
+        if self.accepted_symbols < self.k + DECODE_MARGIN:
+            self._set_phase("collecting")
+            return
+
+        due_to_timer = (now - self.last_decode_attempt) >= DECODE_MIN_INTERVAL
+        due_to_symbols = new_symbol and (
+            (self.accepted_symbols - self.last_decode_symbols) >= DECODE_SYMBOL_STEP
+        )
+        if not (due_to_timer or due_to_symbols):
+            return
+
+        self._set_phase("solving")
+        self.last_decode_attempt = now
+        self.last_decode_symbols = self.accepted_symbols
+        attempt_start = perf_counter()
+        try:
+            recovered = self.decoder.decode()
+        except Exception as exc:
+            self.last_decode_duration = perf_counter() - attempt_start
+            self.decode_error = str(exc)
+            self.finalize_status = "error"
+            self.finalize_error = self.decode_error
+            self._set_phase("error")
+            return
+
+        self.last_decode_duration = perf_counter() - attempt_start
+        if recovered is not None:
+            self._finalize_recovery(recovered)
+        else:
+            self._set_phase("collecting")
+
+    def _finalize_recovery(self, recovered: bytes) -> None:
+        self._set_phase("finalizing")
+        if self.finalize_status == "idle":
+            self.finalize_status = "in_progress"
+            self.finalize_started_at = perf_counter()
+        try:
+            self.recovered_text = recovered.decode("utf-8")
+            self.finalize_status = "done"
+            self._set_phase("done")
+        except Exception as exc:
+            self.finalize_status = "error"
+            self.finalize_error = str(exc)
+            self._set_phase("error")
 
 
 _active_session: Optional[ReceiverSession] = None
