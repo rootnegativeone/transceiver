@@ -362,6 +362,38 @@ body {
     min-height: 360px;
 }
 
+.qr-single {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.qr-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 1.1rem;
+    align-items: center;
+    justify-content: center;
+}
+
+.qr-tile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.4rem;
+    border-radius: 12px;
+    background: rgba(8, 12, 18, 0.6);
+    border: 1px solid rgba(47, 61, 81, 0.4);
+}
+
+.qr-slot-label {
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: rgba(143, 179, 207, 0.7);
+}
+
 .placeholder {
     width: 260px;
     height: 260px;
