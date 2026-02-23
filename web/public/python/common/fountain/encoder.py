@@ -97,6 +97,8 @@ class LTEncoder:
             payload = self._apply_integrity(block)
             if self.metrics:
                 self.metrics.record_degree(1)
+            if self.generated < i + 1:
+                self.generated = i + 1
             yield ([i], payload)
 
     def encode_symbol(self) -> tuple[int, bytes]:
