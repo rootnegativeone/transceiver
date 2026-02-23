@@ -26,3 +26,6 @@ web/.DS_Store
 # Editor
 .idea/
 .vscode/
+
+# Local-only agent context
+AGENT_CONTEXT.md
