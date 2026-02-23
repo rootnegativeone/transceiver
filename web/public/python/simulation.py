@@ -24,11 +24,6 @@ SYNC_PREAMBLE_COUNT = 6
 SYNC_INSERT_INTERVAL = 6
 SYNC_CONFIRMATION_REQUIRED = 4
 
-QR_VERSION = 8
-QR_ECC_LEVEL = "M"
-MAX_QR_VALUE_BYTES = 180
-MAX_SYMBOL_RETRIES = 8
-
 
 def _normalize_indices(idxs: int | Iterable[int]) -> List[int]:
     if isinstance(idxs, int):
@@ -47,11 +42,8 @@ def _encode_metadata_frame(
     }
 
 
-def _encode_symbol_payload(
-    session_id: str,
+def _encode_symbol_frame(
     sequence: int,
-    slot: int,
-    symbol_id: int,
     idx_list: List[int],
     payload: bytes,
     *,
@@ -59,14 +51,10 @@ def _encode_symbol_payload(
 ) -> Dict[str, object]:
     payload_hex = payload.hex()
     indices_part = ",".join(str(i) for i in idx_list)
-    qr_value = (
-        f"S2:{session_id}|{sequence}|{slot}|{symbol_id}|{indices_part}|{payload_hex}"
-    )
+    qr_value = f"S:{sequence}|{indices_part}|{payload_hex}"
     return {
         "sequence": sequence,
         "type": "symbol",
-        "symbol_id": symbol_id,
-        "slot": slot,
         "indices": idx_list,
         "degree": len(idx_list),
         "payload_hex": payload_hex,
@@ -112,14 +100,13 @@ def _prepare_package(payload: bytes, seed: int = DEFAULT_SEED) -> Dict[str, obje
     )
 
     systematic_symbols = [
-        (idxs, payload, True) for idxs, payload in encoder.emit_systematic()
+        (idxs, payload) for idxs, payload in encoder.emit_systematic()
     ]
     redundant_symbols = [
-        (idxs, payload, False)
+        (idxs, payload)
         for idxs, payload in encoder.encode(len(encoder.blocks) + DEFAULT_REDUNDANCY)
     ]
     all_symbols = systematic_symbols + redundant_symbols
-    all_symbols_iter = iter(all_symbols)
 
     session_id = f"TB-{random.getrandbits(32):08X}"
     metadata = {
@@ -156,51 +143,15 @@ def _prepare_package(payload: bytes, seed: int = DEFAULT_SEED) -> Dict[str, obje
     sequence += 1
 
     since_last_sync = 0
-    symbol_id = 0
-    offset = 0
-    while offset < len(all_symbols):
-        symbol_entries = []
-        for slot in range(2):
-            attempts = 0
-            while attempts < MAX_SYMBOL_RETRIES:
-                if offset >= len(all_symbols):
-                    break
-                try:
-                    idxs, payload_bytes, systematic = next(all_symbols_iter)
-                except StopIteration:
-                    idxs, payload_bytes = encoder.encode_symbol()
-                    systematic = False
-                idx_list = _normalize_indices(idxs)
-                entry = _encode_symbol_payload(
-                    session_id=session_id,
-                    sequence=sequence,
-                    slot=slot,
-                    symbol_id=symbol_id,
-                    idx_list=idx_list,
-                    payload=payload_bytes,
-                    systematic=systematic,
-                )
-                if len(entry["qr_value"].encode("utf-8")) <= MAX_QR_VALUE_BYTES:
-                    symbol_entries.append(entry)
-                    symbol_id += 1
-                    offset += 1
-                    break
-                attempts += 1
-
-            if attempts >= MAX_SYMBOL_RETRIES:
-                return {
-                    "error": (
-                        "QR payload exceeds fixed version capacity. "
-                        "Reduce payload size or block size."
-                    )
-                }
-
+    for offset, (idxs, payload_bytes) in enumerate(all_symbols):
+        idx_list = _normalize_indices(idxs)
         frames.append(
-            {
-                "sequence": sequence,
-                "type": "symbol_pair",
-                "symbols": symbol_entries,
-            }
+            _encode_symbol_frame(
+                sequence=sequence,
+                idx_list=idx_list,
+                payload=payload_bytes,
+                systematic=offset < len(systematic_symbols),
+            )
         )
         sequence += 1
         since_last_sync += 1
@@ -272,7 +223,7 @@ class ReceiverSession:
     integrity_check: bool
     decoder: LTDecoder = field(init=False)
     metrics: FountainMetrics = field(init=False)
-    symbol_ids_seen: set[int] = field(default_factory=set)
+    sequences_seen: set[int] = field(default_factory=set)
     unique_indices: set[int] = field(default_factory=set)
     recovered_text: Optional[str] = None
 
@@ -287,9 +238,9 @@ class ReceiverSession:
         )
 
     def add_symbol(
-        self, symbol_id: int, indices: List[int], payload_hex: str
+        self, sequence: int, indices: List[int], payload_hex: str
     ) -> Dict[str, object]:
-        if symbol_id in self.symbol_ids_seen:
+        if sequence in self.sequences_seen:
             return self._status_dict(redundant=True, newly_added=False)
 
         payload = bytes.fromhex(payload_hex)
@@ -297,7 +248,7 @@ class ReceiverSession:
         if not accepted:
             return self._status_dict(redundant=False, newly_added=False)
 
-        self.symbol_ids_seen.add(symbol_id)
+        self.sequences_seen.add(sequence)
         self.unique_indices.update(indices)
 
         recovered = self.decoder.decode()
@@ -312,7 +263,7 @@ class ReceiverSession:
         return {
             "redundant": redundant,
             "newly_added": newly_added,
-            "symbols_observed": len(self.symbol_ids_seen),
+            "symbols_observed": len(self.sequences_seen),
             "unique_symbols": len(self.unique_indices),
             "coverage": coverage,
             "decode_complete": self.recovered_text is not None,
@@ -338,12 +289,12 @@ def reset_receiver(
     return json.dumps({"status": "ready", "block_size": block_size, "k": k})
 
 
-def receiver_add_symbol(symbol_id: int, indices: List[int], payload_hex: str) -> str:
+def receiver_add_symbol(sequence: int, indices: List[int], payload_hex: str) -> str:
     """Forward a decoded symbol from the browser receiver into the fountain decoder."""
     if _active_session is None:
         return json.dumps({"error": "receiver_not_initialised"})
 
-    status = _active_session.add_symbol(symbol_id, indices, payload_hex)
+    status = _active_session.add_symbol(sequence, indices, payload_hex)
     return json.dumps(status)
 
 
@@ -370,22 +321,19 @@ def simulate_transfer(seed: int = DEFAULT_SEED) -> str:
 
     timeline = []
     for frame in package["frames"]:
-        if frame["type"] == "symbol_pair":
-            for symbol in frame["symbols"]:
-                symbol_id = symbol["symbol_id"]
-                indices = symbol["indices"]
-                payload_hex = symbol["payload_hex"]
-                status = json.loads(
-                    receiver_add_symbol(symbol_id, indices, payload_hex)
-                )
-                timeline.append(
-                    {
-                        "sequence": frame["sequence"],
-                        "symbol_id": symbol_id,
-                        "coverage": status["coverage"],
-                        "decode_complete": status["decode_complete"],
-                    }
-                )
+        if frame["type"] != "symbol":
+            continue
+        sequence = frame["sequence"]
+        indices = frame["indices"]
+        payload_hex = frame["payload_hex"]
+        status = json.loads(receiver_add_symbol(sequence, indices, payload_hex))
+        timeline.append(
+            {
+                "sequence": sequence,
+                "coverage": status["coverage"],
+                "decode_complete": status["decode_complete"],
+            }
+        )
 
     package["timeline"] = timeline
     package["receiver_summary"] = json.loads(receiver_status())
