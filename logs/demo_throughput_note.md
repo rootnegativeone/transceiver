@@ -6,7 +6,7 @@
 
 ## What Changed
 - `emit_systematic()` now advances the encoder’s `generated` counter so redundancy symbols are truly LT-coded.
-- Receiver decode is gated: it only attempts solving after `k + margin`, and no more than every 8 new symbols or 400ms.
+- Receiver decode is gated by time and symbol count; it never goes idle even when coverage stops changing.
 - Receiver UI now surfaces phase (Collecting → Solving → Finalizing) and decode attempt timing.
 - Demo cadence is 450ms per frame, block size is 96 bytes, sync insert interval is 8 frames.
 
@@ -21,3 +21,7 @@ After changes (simulated @ 450ms, block size 96):
 
 Notes:
 - These are simulated times at fixed frame cadence; handheld capture will vary.
+
+## How To Verify
+- Run `python scripts/demo_assert_complete.py` (expects completion for ~10KB).
+- Open the receiver UI and confirm “Last solve attempt” updates every ~400ms until completion.

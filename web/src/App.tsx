@@ -110,13 +110,20 @@ type ReceiverStatus = {
   accepted_symbols_total: number;
   accepted_unique_symbols: number;
   k: number;
+  rank_estimate: number;
+  unknowns_remaining: number;
   coverage: number;
   decode_complete: boolean;
   recovered_text: string | null;
-  phase: "collecting" | "solving" | "finalizing";
+  phase: "collecting" | "solving" | "finalizing" | "done" | "error";
   last_decode_attempt_ms: number | null;
+  last_decode_attempt_age_ms: number | null;
   last_decode_duration_ms: number | null;
   phase_durations_ms: Record<string, number>;
+  decode_error: string | null;
+  finalize_status: "idle" | "in_progress" | "done" | "error";
+  finalize_error: string | null;
+  finalize_elapsed_ms: number | null;
   metrics: MetricsSummary;
 };
 
@@ -1951,7 +1958,11 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
       ? "Solving"
       : status.phase === "finalizing"
         ? "Finalizing"
-        : "Collecting"
+        : status.phase === "done"
+          ? "Done"
+          : status.phase === "error"
+            ? "Error"
+            : "Collecting"
     : "Collecting";
 
   return (
@@ -2145,7 +2156,12 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
                 </li>
                 <li>Unique indices: {status.accepted_unique_symbols}</li>
                 <li>
-                  Last solve attempt: {formatMs(status.last_decode_attempt_ms)}
+                  Rank estimate: {status.rank_estimate} · Unknowns{" "}
+                  {status.unknowns_remaining}
+                </li>
+                <li>
+                  Last solve attempt:{" "}
+                  {formatMs(status.last_decode_attempt_age_ms)} ago
                 </li>
                 <li>
                   Last solve duration:{" "}
@@ -2157,6 +2173,18 @@ const ReceiverView = ({ callPythonJson, onBack }: ReceiverViewProps) => {
                   {formatMs(status.phase_durations_ms.solving)} · Finalizing{" "}
                   {formatMs(status.phase_durations_ms.finalizing)}
                 </li>
+                <li>Finalize: {status.finalize_status}</li>
+                {status.finalize_status === "in_progress" && (
+                  <li>
+                    Finalize elapsed: {formatMs(status.finalize_elapsed_ms)}
+                  </li>
+                )}
+                {status.decode_error && (
+                  <li>Decode error: {status.decode_error}</li>
+                )}
+                {status.finalize_error && (
+                  <li>Finalize error: {status.finalize_error}</li>
+                )}
                 <li>
                   Reconstruction:{" "}
                   {status.decode_complete ? "Verified" : "In progress"}
