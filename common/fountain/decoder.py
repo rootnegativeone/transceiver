@@ -5,9 +5,9 @@ Provides compatibility with systematic and redundant LT fountain streams.
 
 from __future__ import annotations
 
+import zlib
 from time import perf_counter
 from typing import Iterable, List, Optional, Sequence, Tuple
-import zlib
 
 from ..shared.metrics import FountainMetrics
 from ..shared.utils import combine_blocks
@@ -48,7 +48,7 @@ class LTDecoder:
         self.metrics = metrics
         self.symbols: List[Tuple[List[int], bytes]] = []
 
-    def add_symbol(self, idxs: int | Iterable[int], payload: bytes) -> None:
+    def add_symbol(self, idxs: int | Iterable[int], payload: bytes) -> bool:
         """Add a received symbol, dropping it if integrity checks fail."""
         if isinstance(idxs, int):
             idx_list = [idxs]
@@ -60,17 +60,18 @@ class LTDecoder:
             if len(payload_bytes) < self.tag_bytes:
                 if self.metrics:
                     self.metrics.record_symbol_rejected("too_short")
-                return
+                return False
             data = payload_bytes[: -self.tag_bytes]
             provided = payload_bytes[-self.tag_bytes :]
             expected = zlib.crc32(data) & 0xFFFFFFFF
             if provided != expected.to_bytes(self.tag_bytes, byteorder="big"):
                 if self.metrics:
                     self.metrics.record_symbol_rejected("crc_mismatch")
-                return
+                return False
             payload_bytes = data
 
         self.symbols.append((idx_list, payload_bytes))
+        return True
 
     def decode(self) -> bytes | None:
         """
