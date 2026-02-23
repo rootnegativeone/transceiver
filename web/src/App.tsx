@@ -224,6 +224,7 @@ const QR_MARGIN_MODULES = 4;
 const QR_MODULE_TARGET = 7;
 const QR_MODULES = 17 + 4 * QR_VERSION;
 const QR_BASE_SIZE = (QR_MODULES + 2 * QR_MARGIN_MODULES) * QR_MODULE_TARGET;
+const MAX_QR_VALUE_BYTES = 180;
 
 const formatSessionId = (metadata: BroadcastMetadata | null) => {
   if (!metadata) {
@@ -384,7 +385,14 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
       return [displayFrame.qr_value];
     }
     return [];
-  }, [displayFrame, displayQrValues]);
+  }, [displayFrame, displaySymbols]);
+  const oversizedQrValues = useMemo(
+    () =>
+      displayQrValues.filter(
+        (value) => measureUtf8Bytes(value) > MAX_QR_VALUE_BYTES,
+      ),
+    [displayQrValues],
+  );
   const qrColors = useMemo(
     () =>
       useBrandPalette
@@ -866,31 +874,41 @@ const SenderView = ({ callPythonJson, onBack }: SenderViewProps) => {
         <div className="sender-grid">
           <div className="qr-stage">
             {displayFrame ? (
-              <div
-                className={
-                  displayQrValues.length > 1 ? "qr-stack" : "qr-single"
-                }
-              >
-                {displayQrValues.map((value, idx) => (
-                  <div className="qr-tile" key={`${displayFrameIndex}-${idx}`}>
-                    <QRCodeSVG
-                      value={value}
-                      size={displaySize}
-                      bgColor={qrColors.bg}
-                      fgColor={qrColors.fg}
-                      includeMargin
-                      marginSize={QR_MARGIN_MODULES}
-                      level="M"
-                      version={QR_VERSION}
-                    />
-                    {displayQrValues.length > 1 && (
-                      <div className="qr-slot-label">
-                        {idx === 0 ? "Slot A" : "Slot B"}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
+              oversizedQrValues.length ? (
+                <div className="placeholder placeholder-error">
+                  QR payload exceeds fixed version capacity. Reduce payload size
+                  or block size.
+                </div>
+              ) : (
+                <div
+                  className={
+                    displayQrValues.length > 1 ? "qr-stack" : "qr-single"
+                  }
+                >
+                  {displayQrValues.map((value, idx) => (
+                    <div
+                      className="qr-tile"
+                      key={`${displayFrameIndex}-${idx}`}
+                    >
+                      <QRCodeSVG
+                        value={value}
+                        size={displaySize}
+                        bgColor={qrColors.bg}
+                        fgColor={qrColors.fg}
+                        includeMargin
+                        marginSize={QR_MARGIN_MODULES}
+                        level="M"
+                        version={QR_VERSION}
+                      />
+                      {displayQrValues.length > 1 && (
+                        <div className="qr-slot-label">
+                          {idx === 0 ? "Slot A" : "Slot B"}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )
             ) : (
               <div className="placeholder">
                 {isTestMode ? "Choose a test frame" : "Initiate session"}
